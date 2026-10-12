@@ -2590,6 +2590,21 @@ function ensureGroupEight(group){
                     (function(blockFn, costIndex){ return function(lv){ return autoCost(blockFn, costIndex, lv); }; })(group.block, idx),
                     names.en, names.pt, "", "", "" + b.name + " " + category + " upgrade improvement speed");
             }
+            // Real gameplay effect sizes by category (testers: capacity-only felt useless)
+            try{
+                var be = 0.10;
+                if(category === "power") be = 0.16;
+                else if(category === "crafting") be = 0.12;
+                else if(category === "production") be = 0.14;
+                else if(category === "turret") be = 0.11;
+                else if(category === "defense") be = 0.08;
+                UPGRADES[id].boostEach = be;
+                UPGRADES[id].effectKind =
+                    category === "power" ? "power" :
+                    category === "crafting" ? "craft" :
+                    category === "production" ? "mine" :
+                    category === "turret" ? "turret" : "generic";
+            }catch(eBe){}
             // Always refresh titles/descriptions (unique per role + language)
             UPGRADES[id].nameEn = names.en;
             UPGRADES[id].namePt = names.pt || names.en;
@@ -7402,8 +7417,8 @@ function injectSettingsAdminButton(){
 }
 
 
-var BOOST_TICK_INTERVAL = 360;      // ~6s between boost pulses (FPS)
-var BOOST_DURATION = 420;           // longer than interval so effect never drops
+var BOOST_TICK_INTERVAL = 45;       // ~0.75s between boost pulses (visible, less laggy than every frame)
+var BOOST_DURATION = 90;            // slightly longer than interval so effect never drops
 var SCAN_TICK_INTERVAL = 720;       // rebuild target list ~12s (FPS)
 var lastBoostTick = -1000;
 var lastScanTick = -1000;
@@ -7476,8 +7491,21 @@ function installedBoostData(build){
             if(u != null && u.bulletKind != null) continue; // combat system only
             if(u != null && u.conditional && !conditionSatisfied(build, u)) continue;
             var each = u != null && u.boostEach != null ? u.boostEach : 0.07;
+            // Legacy cards without boostEach: still meaningful by category
+            if(u != null && u.boostEach == null){
+                try{
+                    var bb = u.block != null ? u.block() : null;
+                    var cat = categoryOfBlock(bb);
+                    if(cat === "power") each = 0.16;
+                    else if(cat === "crafting") each = 0.12;
+                    else if(cat === "production") each = 0.14;
+                    else if(cat === "turret") each = 0.11;
+                }catch(eCat){}
+            }
+            if(u != null && u.boost != null && u.boost > each) each = u.boost;
             if(u != null && u.tier === "ultimate") each = Math.max(each, 0.75);
             if(u != null && u.tier === "final") each = Math.max(each, 1.25);
+            if(u != null && u.isCombo) each = Math.max(each, 0.08);
             data.factor += each * lv;
             if(u != null && u.tier === "ultimate") data.hasUltimate = true;
             if(u != null && u.tier === "final") data.hasFinal = true;
@@ -7665,6 +7693,12 @@ function applyMasterEffectGlobal(block, u){
             if(block.reload != null) block.reload = Math.max(1, masterBaseState["" + block.name].reload * 0.82);
         }else if(k === "generic-cap" && block.itemCapacity != null){
             block.itemCapacity = Math.max(block.itemCapacity, masterBaseState["" + block.name].itemCapacity + 4);
+            // Also a small global craft/mine feel via health as side-grade was capacity-only complaints
+            try{
+                if(block.consumeItems != null || block.outputItem != null){
+                    /* capacity masters keep capacity; speed comes from installed boostEach */
+                }
+            }catch(eCap2){}
         }else if(k === "liquid-reserve" && block.liquidCapacity != null){
             block.liquidCapacity = Math.max(block.liquidCapacity, masterBaseState["" + block.name].liquidCapacity * 1.25);
         }else if(k === "arc-chain"){
@@ -7758,6 +7792,83 @@ function applyConditionalFactoryRecipes(build){
     }
 }
 
+
+function isPowerGeneratorBlock(block){
+    if(block == null) return false;
+    try{
+        var n = (""+block.name).toLowerCase();
+        if(n.indexOf("reactor") >= 0 || n.indexOf("panel") >= 0 || n.indexOf("generator") >= 0) return true;
+        if(n.indexOf("battery") >= 0 || n.indexOf("node") >= 0 || n.indexOf("diode") >= 0) return false;
+    }catch(e0){}
+    try{
+        var cls = classNameOf(block).toLowerCase();
+        if(cls.indexOf("powergenerator") >= 0 || cls.indexOf("nuclearreactor") >= 0) return true;
+        if(cls.indexOf("impactreactor") >= 0 || cls.indexOf("consumegenerator") >= 0) return true;
+        if(cls.indexOf("solargenerator") >= 0 || cls.indexOf("thermalgenerator") >= 0) return true;
+        if(cls.indexOf("rtggenerator") >= 0) return true;
+    }catch(e1){}
+    try{ if(block.powerProduction != null && block.powerProduction > 0) return true; }catch(e2){}
+    return false;
+}
+
+function ntAttachPowerBoostLogic(block){
+    if(block == null || block.__ntPowerLogic) return;
+    if(!isPowerGeneratorBlock(block)) return;
+    block.__ntPowerLogic = true;
+    try{
+        var prev = block.buildType;
+        if(prev == null) return;
+        var sample = null;
+        try{ sample = prev.get(); }catch(eS){}
+        var BuildClass = null;
+        try{ if(sample != null) BuildClass = sample.getClass(); }catch(eC){}
+        if(BuildClass == null) return;
+        block.buildType = function(){
+            return extend(BuildClass, {
+                getPowerProduction: function(){
+                    var base = 0;
+                    try{ base = this.super$getPowerProduction(); }catch(e0){
+                        try{ base = this.super$getPowerProduction(this); }catch(e1){ base = 0; }
+                    }
+                    var mult = 1;
+                    try{
+                        if(this.__ntPowerMult != null && this.__ntPowerMult > 1) mult = this.__ntPowerMult;
+                        else {
+                            // fallback: compute from installs if boost tick not yet run
+                            var d = installedBoostData(this);
+                            if(d != null && d.factor > 0) mult = 1 + Math.min(1.8, d.factor);
+                        }
+                    }catch(eM){}
+                    if(mult < 1) mult = 1;
+                    if(mult > 3.5) mult = 3.5;
+                    return base * mult;
+                },
+                updateTile: function(){
+                    // Keep mult fresh even between boost pulses
+                    try{
+                        var d = installedBoostData(this);
+                        if(d != null && d.factor > 0){
+                            this.__ntPowerMult = 1 + Math.min(1.8, d.factor);
+                        }
+                    }catch(eU){}
+                    this.super$updateTile();
+                }
+            });
+        };
+    }catch(e){
+        try{ Log.warn("New Tech's power attach failed: " + block.name + " " + e); }catch(e2){}
+    }
+}
+
+function ntAttachAllPowerBoostLogic(){
+    try{
+        Vars.content.blocks().each(function(b){
+            try{ ntAttachPowerBoostLogic(b); }catch(e1){}
+        });
+    }catch(e){}
+}
+
+
 function applyBoostToBuild(build){
     // specialization hook applied inside when factor is known
 
@@ -7783,14 +7894,35 @@ function applyBoostToBuild(build){
     }catch(eCap){}
     if(factor > maxF) factor = maxF;
     if(factor > 1.0){
-        try{ (function(){
-                    try{
-                        var cat = categoryOfBlock(build.block);
-                        var sm = specMultiplierForCategory(cat);
-                        factor = factor * sm;
-                    }catch(eSp){}
-                    build.applyBoost(factor, BOOST_DURATION);
-                })(); }catch(e){}
+        try{
+            var cat = categoryOfBlock(build.block);
+            try{
+                var sm = specMultiplierForCategory(cat);
+                factor = factor * sm;
+            }catch(eSp){}
+            // Vanilla timeScale boost (craft speed, drill speed, turret reload)
+            try{ build.applyBoost(factor, BOOST_DURATION); }catch(e0){}
+            // Power gens: timeScale does NOT raise max output (Impact stays flat at warmup=1).
+            // Store multiplier; getPowerProduction hook multiplies real energy.
+            try{
+                if(cat === "power" || isPowerGeneratorBlock(build.block)){
+                    build.__ntPowerMult = factor;
+                }else{
+                    build.__ntPowerMult = 1;
+                }
+            }catch(eP){}
+            // Crafters: nudge progress when idle-ish so speed is obvious
+            try{
+                if(cat === "crafting" && build.progress != null && factor > 1.05){
+                    var prog = build.progress;
+                    if(prog > 0.02 && prog < 0.98){
+                        build.progress = Math.min(1, prog + (factor - 1) * 0.02);
+                    }
+                }
+            }catch(eC){}
+        }catch(e){}
+    }else{
+        try{ build.__ntPowerMult = 1; }catch(e1){}
     }
     // Aim assist only for turrets that already have installed aim bonuses
     if(data.aim > 0){
@@ -9120,7 +9252,8 @@ Events.on(ClientLoadEvent, function(e){
     loadHistory();
     try{ Timer.schedule(function(){ try{ registerExclusiveRollUpgrades(); }catch(eEx){} }, 0.25); }catch(eEx2){}
     try{ Timer.schedule(function(){ try{ reloadDrillOverlayRegions(); }catch(eD){}
-                try{ reloadFactoryOverlayRegions(); }catch(eF){} }, 0.5); }catch(eT){}
+                try{ reloadFactoryOverlayRegions(); }catch(eF){}
+                try{ ntAttachAllPowerBoostLogic(); }catch(ePow){} }, 0.5); }catch(eT){}
     setupNetHandlers();
     ensureCatalogBuilt();
     refreshGlobalBoostRanks();
@@ -9218,6 +9351,7 @@ Events.on(WorldLoadEvent, function(e){
     activeStoreKey = null;
     activeTagKey = null;
     loadPersistentState();
+    try{ ntAttachAllPowerBoostLogic(); }catch(ePowW){}
     try{
         // Only touch transport system if player actually researched conveyor upgrades
         Timer.schedule(function(){
