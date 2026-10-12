@@ -1,0 +1,7 @@
+name: "new-techs"
+displayName: "New Tech's"
+author: "Gubby"
+description: "Research upgrades for your buildings and unlock them in-game.\n\nHow to use:\n1. Pause and open New Tech's.\n2. Pick a category and block, then research.\n3. Double-tap a building on the map to install upgrades."
+version: "1.31.3"
+minGameVersion: "146"
+hidden: false

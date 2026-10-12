@@ -1,0 +1,6 @@
+*.class
+*.jar
+.DS_Store
+.idea/
+out/
+build/
