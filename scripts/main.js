@@ -812,6 +812,19 @@ function loadPersistentState(){
             else exclusiveUnlocked = exclusiveUnlocked || {};
             if(data.prestige != null) prestigeBySector = data.prestige;
             else prestigeBySector = prestigeBySector || {};
+            // Clamp broken infinite-star saves (legacy bug: star every setLevel)
+            try{
+                var pk = Object.keys(prestigeBySector || {});
+                for(var pi = 0; pi < pk.length; pi++){
+                    var pp = prestigeBySector[pk[pi]];
+                    if(pp == null) continue;
+                    if((pp.stars|0) > 20) pp.stars = 20;
+                    if(pp.granted == null || typeof pp.granted !== "object") pp.granted = {};
+                    if((pp.mine|0) > 5) pp.mine = 5;
+                    if((pp.research|0) > 5) pp.research = 5;
+                    if((pp.power|0) > 5) pp.power = 5;
+                }
+            }catch(eClamp){}
     persistentPartial = data.partial || {};
 
     // Keep the current save/settings copy synchronized after loading.
@@ -871,12 +884,8 @@ function setLevel(id, lv){
     ensurePersistentState();
     var prev = persistentLevels[id]|0;
     persistentLevels[id] = lv|0;
-    // Campaign prestige: earn a star when rank increases
-    try{
-        if((lv|0) > prev && isCampaign() && currentSectorKey() != null){
-            addPrestigeStar(1);
-        }
-    }catch(ePr){}
+    // Campaign prestige: at most 1 star per upgrade id (first research only)
+    try{ tryGrantResearchPrestigeStar(id, prev, lv); }catch(ePr){}
     savePersistentState(false); // memory only — never manualSave on click
     var u = UPGRADES[id] != null ? UPGRADES[id] : MASTER_UPGRADES[id];
     var isBullet = u != null && u.bulletKind != null;
@@ -1742,8 +1751,9 @@ function ensureUltimateFinalCards(group){
 function ensureGroupReady(group){
     if(group == null) return;
     if(group._enriched){
-        // still ensure ultimate/final present for turrets
+        // still ensure ultimate/final/combo present
         try{ ensureUltimateFinalCards(group); }catch(e0){}
+        try{ ensureComboMastery(group); }catch(eC0){}
         return;
     }
     try{
@@ -1752,6 +1762,7 @@ function ensureGroupReady(group){
             if(group.block != null) appendSignatureUpgrades(group, group.block());
         }catch(eS){}
         ensureUltimateFinalCards(group);
+        try{ ensureComboMastery(group); }catch(eC1){}
     }catch(e){}
     group._enriched = true;
 }
@@ -4204,6 +4215,52 @@ function bulletId(prefix, name, kind){
 
 
 
+// ========== Bullet config (JSON) + runtime spawn (JS) ==========
+// data/bullets.json = stats / rules. JavaScript only creates/spawns bullets.
+var BULLET_CONFIG = null;
+
+function loadBulletConfig(){
+    if(BULLET_CONFIG != null) return BULLET_CONFIG;
+    BULLET_CONFIG = { version: 1, turrets: { duo: {
+        enabled: true,
+        extraBullets: { useResearchOrInstall: true, perRank: 1, maxExtras: 3, spreadDegrees: 4.0, sizeScalePerRank: 0.14 },
+        ammo: { scaleSizeOnly: true, restoreCombatStats: true }
+    }}};
+    try{
+        var mod = null;
+        try{ mod = Vars.mods.locateMod("new-techs"); }catch(e0){}
+        if(mod == null){
+            try{
+                Vars.mods.each(function(m){
+                    if(mod == null && m != null && m.meta != null && (""+m.meta.name).toLowerCase().indexOf("new-tech") >= 0) mod = m;
+                });
+            }catch(e1){}
+        }
+        if(mod != null && mod.root != null){
+            var f = mod.root.child("data/bullets.json");
+            if(f != null && f.exists()){
+                var raw = f.readString();
+                if(raw != null && (""+raw).length > 5){
+                    var parsed = JSON.parse(""+raw);
+                    if(parsed != null) BULLET_CONFIG = parsed;
+                }
+            }
+        }
+    }catch(e){
+        try{ Log.warn("New Tech's: bullets.json load failed: " + e); }catch(e2){}
+    }
+    return BULLET_CONFIG;
+}
+
+function turretBulletCfg(blockName){
+    var cfg = loadBulletConfig();
+    try{
+        if(cfg != null && cfg.turrets != null && cfg.turrets[blockName] != null)
+            return cfg.turrets[blockName];
+    }catch(e){}
+    return null;
+}
+
 // ========== DUO bullet variants (test focus) ==========
 // One independent variation chain PER ammo item on Blocks.duo.
 var duoAmmoOriginals = null; // { itemName: {damage,speed,lifetime,pierce,splash,splashR, ref: BulletType} }
@@ -4244,11 +4301,19 @@ function snapshotDuoAmmoOriginals(){
 
 /** Apply rank 0..5 onto each Duo ammo BulletType IN PLACE from originals (cheap, no clone spam). */
 function applyDuoAmmoRank(rank){
-    // Only SIZE on ammo types — no damage/speed replace. Extra bullets spawn at runtime.
+    // Stats from data/bullets.json; JS only mutates size (optional) — extras spawn at runtime.
     rank = rank|0;
     if(rank < 0) rank = 0;
     if(rank > 5) rank = 5;
     if(rank === duoLastAppliedRank && duoVariantsReady) return;
+    var tcfg = turretBulletCfg("duo");
+    var sizeScale = 0.14;
+    var sizeOnly = true;
+    try{
+        if(tcfg != null && tcfg.extraBullets != null && tcfg.extraBullets.sizeScalePerRank != null)
+            sizeScale = tcfg.extraBullets.sizeScalePerRank;
+        if(tcfg != null && tcfg.ammo != null && tcfg.ammo.scaleSizeOnly === false) sizeOnly = false;
+    }catch(eC){}
     var originals = snapshotDuoAmmoOriginals();
     var keys = Object.keys(originals);
     for(var i = 0; i < keys.length; i++){
@@ -4260,8 +4325,8 @@ function applyDuoAmmoRank(rank){
         try{ bt.damage = o.damage; }catch(eD){}
         try{ if(o.speed != null) bt.speed = o.speed; }catch(eV){}
         try{ if(o.lifetime != null) bt.lifetime = o.lifetime; }catch(eL){}
-        // Size only — scales with research rank
-        var sm = 1 + 0.14 * rank;
+        // Size from JSON scale
+        var sm = 1 + sizeScale * rank;
         try{ if(o.width > 0) bt.width = o.width * sm; }catch(eW){}
         try{ if(o.height > 0) bt.height = o.height * sm; }catch(eH){}
         try{ if(bt.hitSize != null && o.width > 0) bt.hitSize = o.width * sm * 0.5; }catch(eHS){}
@@ -5055,6 +5120,8 @@ function processFreshBullet(b){
         }catch(eN){}
         if(bname !== "duo") return;
 
+        var tcfg = turretBulletCfg("duo");
+        if(tcfg != null && tcfg.enabled === false) return;
         var ir = 0;
         try{ ir = duoBuildingInstallRank(o)|0; }catch(eI){}
         var rr = 0;
@@ -5062,18 +5129,25 @@ function processFreshBullet(b){
         var rank = Math.max(ir, rr);
         if(rank <= 0) return;
 
-        // 1 extra at rank1, 2 at rank2, 3 at rank3+
-        var extraN = Math.min(3, Math.max(1, rank));
+        var perRank = 1, maxExtras = 3, spreadDeg = 4.0;
+        try{
+            if(tcfg != null && tcfg.extraBullets != null){
+                var eb = tcfg.extraBullets;
+                if(eb.perRank != null) perRank = eb.perRank|0;
+                if(eb.maxExtras != null) maxExtras = eb.maxExtras|0;
+                if(eb.spreadDegrees != null) spreadDeg = eb.spreadDegrees;
+            }
+        }catch(eCfg){}
+        var extraN = Math.min(maxExtras, Math.max(1, rank * Math.max(1, perRank)));
         var baseAng = 0;
         try{ baseAng = b.rotation(); }catch(eA){
             try{ baseAng = b.vel != null ? b.vel.angle() : 0; }catch(eA2){ baseAng = 0; }
         }
         for(var k = 0; k < extraN; k++){
             try{
-                var spread = (k - (extraN - 1) / 2) * 4.0;
+                var spread = (k - (extraN - 1) / 2) * spreadDeg;
                 var ang = baseAng + spread;
-                // Avoid spawning a perfect duplicate on the original angle when extraN is odd
-                if(Math.abs(spread) < 0.01 && extraN > 1) ang = baseAng + 2.5;
+                if(Math.abs(spread) < 0.01 && extraN > 1) ang = baseAng + (spreadDeg * 0.6);
                 spawnExtraBulletFrom(b, ang);
             }catch(eOne){}
         }
@@ -6325,24 +6399,48 @@ function currentSectorKey(){
 }
 
 function getSectorPrestige(key){
-    if(key == null) return {stars:0, mine:0, research:0, power:0};
+    if(key == null) return {stars:0, mine:0, research:0, power:0, granted:{}};
     if(prestigeBySector == null) prestigeBySector = {};
-    if(prestigeBySector[key] == null) prestigeBySector[key] = {stars:0, mine:0, research:0, power:0};
+    if(prestigeBySector[key] == null) prestigeBySector[key] = {stars:0, mine:0, research:0, power:0, granted:{}};
     var p = prestigeBySector[key];
     if(p.stars == null) p.stars = 0;
     if(p.mine == null) p.mine = 0;
     if(p.research == null) p.research = 0;
     if(p.power == null) p.power = 0;
+    if(p.granted == null || typeof p.granted !== "object") p.granted = {};
+    if((p.stars|0) > 20) p.stars = 20;
     return p;
 }
 
-function addPrestigeStar(amount){
+function addPrestigeStar(amount, grantKey){
     var key = currentSectorKey();
     if(key == null) return false;
     var p = getSectorPrestige(key);
-    p.stars = (p.stars|0) + (amount|0);
+    // Same grantKey cannot award twice in this sector (stops infinite stars)
+    if(grantKey != null){
+        if(p.granted == null) p.granted = {};
+        var gk = ""+grantKey;
+        if(p.granted[gk]) return false;
+        p.granted[gk] = true;
+    }
+    var add = amount|0;
+    if(add <= 0) return false;
+    var cur = p.stars|0;
+    if(cur >= 20) return false;
+    p.stars = Math.min(20, cur + add);
     try{ savePersistentState(false); }catch(e){}
     return true;
+}
+
+/** 1 star per upgrade id — only the first time it leaves level 0 */
+function tryGrantResearchPrestigeStar(upgradeId, prevLv, newLv){
+    try{
+        if(!isCampaign()) return;
+        if(currentSectorKey() == null) return;
+        if((newLv|0) <= (prevLv|0)) return;
+        if((prevLv|0) > 0) return;
+        addPrestigeStar(1, "research:" + upgradeId);
+    }catch(e){}
 }
 
 function spendPrestigeStar(stat){
@@ -6376,7 +6474,7 @@ function showPrestigeDialog(){
         var p = getSectorPrestige(key);
         body.add("[accent]" + tr("Sector: ", "Setor: ") + key).row();
         body.add("[#ffd54f]" + tr("Stars: ", "Estrelas: ") + (p.stars|0)).padBottom(6).row();
-        body.add("[white]" + tr("Earn 1 star when you research an upgrade in this sector (max 1 per research action).", "Ganhe 1 estrela ao pesquisar uma melhoria neste setor (max 1 por pesquisa).")).wrap().padBottom(6).row();
+        body.add("[white]" + tr("Earn 1 star the first time you research each upgrade in this sector (cap 20 stars).", "Ganhe 1 estrela na primeira vez que pesquisar cada melhoria neste setor (limite 20 estrelas).")).wrap().padBottom(6).row();
         function rowStat(stat, en, pt){
             body.table(Tex.pane, function(r){
                 r.left();
@@ -6392,21 +6490,11 @@ function showPrestigeDialog(){
         rowStat("mine", "Mining +2%/rank", "Mineracao +2%/rank");
         rowStat("research", "Research cost -2%/rank", "Custo pesquisa -2%/rank");
         rowStat("power", "Power gen +2%/rank", "Geracao +2%/rank");
-        body.button(tr("Claim star (research gate)", "Resgatar estrela (pesquisa)"), function(){
-            // Manual claim: need at least 3 researched levels total this session in sector - simple: always allow 1 star every 10 min via settings
-            var cdKey = "newtechs-prestige-cd-" + key;
-            var last = 0;
-            try{ last = Core.settings.getLong(cdKey, 0); }catch(e){}
-            var now = Time.millis();
-            if(now - last < 10*60*1000){
-                quietInfo(tr("Cooldown 10 min between manual stars.", "Cooldown 10 min entre estrelas manuais."));
-                return;
-            }
-            try{ Core.settings.put(cdKey, now); }catch(e2){}
-            addPrestigeStar(1);
-            dialog.hide();
-            showPrestigeDialog();
-        }).growX().height(42).padTop(6).row();
+        body.add("[gray]" + tr(
+            "Stars come from researching upgrades (1 star per upgrade, once). No free farm.",
+            "Estrelas vem de pesquisar upgrades (1 estrela por upgrade, uma vez). Sem farm gratis."
+        )).wrap().padTop(6).row();
+        // Manual claim removed — was giving infinite stars when cooldown settings failed
     }
     dialog.addCloseButton();
     dialog.cont.pane(body).grow().pad(8);
@@ -9571,16 +9659,36 @@ function countResearchedForGroup(group){
     if(group == null || group.upgrades == null) return 0;
     var n = 0;
     for(var i = 0; i < group.upgrades.length; i++){
-        if(levelOf(group.upgrades[i]) > 0) n++;
+        var id = group.upgrades[i];
+        if(id == null) continue;
+        if((""+id).indexOf("combo-") === 0) continue;
+        var u = UPGRADES[id];
+        if(u != null && (u.isCombo || u.tier === "combo" || u.tier === "ultimate" || u.tier === "final")) continue;
+        if(levelOf(id) > 0) n++;
     }
     return n;
 }
+function researchRankSum(group){
+    if(group == null || group.upgrades == null) return 0;
+    var sum = 0;
+    for(var i = 0; i < group.upgrades.length; i++){
+        var id = group.upgrades[i];
+        if((""+id).indexOf("combo-") === 0) continue;
+        var u = UPGRADES[id];
+        if(u != null && (u.tier === "ultimate" || u.tier === "final" || u.isCombo)) continue;
+        sum += levelOf(id)|0;
+    }
+    return sum;
+}
+
 function ensureComboMastery(group){
     if(group == null || group.block == null) return;
     var block = group.block();
     if(block == null) return;
+    // Ready when 3 different cards researched OR 3 total ranks (same as COMBO badge)
     var n = countResearchedForGroup(group);
-    if(n < 3) return;
+    var sum = researchRankSum(group);
+    if(n < 3 && sum < 3) return;
     var id = "combo-" + safePart(block.name);
     if(UPGRADES[id] == null){
         UPGRADES[id] = {
@@ -9597,17 +9705,23 @@ function ensureComboMastery(group){
             desc: function(lv){ return tr(this.descEn, this.descPt); },
             keys: block.name + " combo mastery set",
             boost: 0.08,
+            boostEach: 0.08,
             installable: true,
-            isCombo: true
+            isCombo: true,
+            tier: "combo"
         };
-        if(group.upgrades.indexOf(id) < 0) group.upgrades.push(id);
     }
+    if(group.upgrades.indexOf(id) < 0) group.upgrades.push(id);
+    // Auto-unlock the combo card once (research free) so it appears for install
     if(levelOf(id) <= 0){
-        persistentLevels[id] = 1;
-        try{ savePersistentState(true); }catch(e2){}
-        try{ quietInfo(tr("Combo unlocked: " + block.localizedName + " Mastery!", "Combo desbloqueado: Maestria " + block.localizedName + "!")); }catch(e3){}
+        try{
+            ensurePersistentState();
+            persistentLevels[id] = 1;
+            savePersistentState(false);
+        }catch(e2){}
     }
 }
+
 
 function ensurePointSystems(){
     ensurePersistentState();

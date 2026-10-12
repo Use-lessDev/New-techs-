@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "turrets": {
+    "duo": {
+      "enabled": true,
+      "extraBullets": {
+        "useResearchOrInstall": true,
+        "perRank": 1,
+        "maxExtras": 3,
+        "spreadDegrees": 4.0,
+        "sizeScalePerRank": 0.14
+      },
+      "ammo": {
+        "scaleSizeOnly": true,
+        "restoreCombatStats": true
+      }
+    }
+  }
+}
